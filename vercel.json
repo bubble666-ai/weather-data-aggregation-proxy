@@ -1,8 +1,23 @@
 {
   "version": 2,
-  "name": "weather-dashboard-api",
+  "name": "weather-data-aggregation-proxy",
+  "regions": ["iad1", "cdg1", "hnd1"],
   "rewrites": [
     { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "headers": [
+    {
+      "source": "/health",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/metrics",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
   ],
   "trailingSlash": false
 }

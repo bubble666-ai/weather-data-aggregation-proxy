@@ -1,79 +1,163 @@
 /**
- * Weather Dashboard API — Edge Proxy Handler
+ * Weather Data Aggregation Gateway — Edge Handler
  *
- * Forwards incoming weather data requests to the configured
- * backend weather aggregation service. Streams responses in
- * real-time for live forecast feeds.
+ * Primary entry point for the edge-deployed data aggregation
+ * service. Routes requests to internal endpoints (health,
+ * metrics, docs) or forwards them to the upstream weather
+ * data provider for real-time aggregation.
+ *
+ * Architecture:
+ *   Client → Edge (this handler) → Upstream Data Service
+ *
+ * @module handler
+ * @version 2.4.0
  */
 
-export const config = { runtime: "edge" };
+import { config } from "../lib/config.js";
+import { forwardToUpstream } from "../lib/gateway.js";
+import { logger } from "../lib/logger.js";
+import { jsonSuccess, jsonError } from "../lib/responses.js";
 
-// Backend weather service URL (set via Vercel env vars)
-const WEATHER_SERVICE_URL = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+export const runtime = "edge";
 
-// Headers that should not be forwarded to the upstream service
-const HOP_BY_HOP_HEADERS = new Set([
-  "host",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "forwarded",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-forwarded-port",
+/* ───────────────────── Internal Route Handlers ───────────────────── */
+
+/** GET /health — Liveness probe for uptime monitors */
+function handleHealth() {
+  return jsonSuccess({
+    status: "healthy",
+    service: config.serviceName,
+    version: config.serviceVersion,
+    environment: config.environment,
+    timestamp: new Date().toISOString(),
+    upstreamConfigured: !!config.upstreamBaseUrl,
+  });
+}
+
+/** GET /metrics — Basic runtime metrics (Prometheus-compatible) */
+function handleMetrics() {
+  const now = Date.now();
+  const lines = [
+    `# HELP service_info Static service metadata`,
+    `# TYPE service_info gauge`,
+    `service_info{service="${config.serviceName}",version="${config.serviceVersion}",env="${config.environment}"} 1`,
+    `# HELP service_uptime_seconds Approximate handler uptime`,
+    `# TYPE service_uptime_seconds gauge`,
+    `service_uptime_seconds ${Math.floor(now / 1000)}`,
+    `# HELP upstream_configured Whether upstream target is set`,
+    `# TYPE upstream_configured gauge`,
+    `upstream_configured ${config.upstreamBaseUrl ? 1 : 0}`,
+  ];
+
+  return new Response(lines.join("\n") + "\n", {
+    status: 200,
+    headers: {
+      "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+/** GET / — Service landing page / API documentation */
+function handleRoot() {
+  return jsonSuccess({
+    service: config.serviceName,
+    version: config.serviceVersion,
+    description: "Real-time weather data aggregation and distribution gateway",
+    endpoints: {
+      "/health": "Service health check (GET)",
+      "/metrics": "Prometheus-compatible metrics (GET)",
+      "/api/v1/*": "Weather data proxy — forwards to upstream provider",
+    },
+    documentation: "https://github.com/bubble666-ai/weather-data-aggregation-proxy",
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/* ───────────────────── Request Router ───────────────────── */
+
+/**
+ * Internal routes served directly by the edge function.
+ * Everything else is forwarded to the upstream data service.
+ */
+const INTERNAL_ROUTES = new Map([
+  ["/health", handleHealth],
+  ["/healthz", handleHealth],
+  ["/metrics", handleMetrics],
 ]);
 
+/**
+ * Extracts the pathname from a full request URL.
+ * @param {string} url
+ * @returns {string}
+ */
+function extractPath(url) {
+  const idx = url.indexOf("/", 8); // skip "https://"
+  if (idx === -1) return "/";
+  const qIdx = url.indexOf("?", idx);
+  return qIdx === -1 ? url.slice(idx) : url.slice(idx, qIdx);
+}
+
+/* ───────────────────── Main Edge Handler ───────────────────── */
+
+/**
+ * Edge function entry point. Handles all incoming requests:
+ *  1. Internal management endpoints (health, metrics)
+ *  2. Data aggregation proxy (everything else → upstream)
+ *
+ * @param {Request} req - Incoming edge request
+ * @returns {Promise<Response>}
+ */
 export default async function handler(req) {
-  if (!WEATHER_SERVICE_URL) {
-    return new Response("Service unavailable: weather backend is not configured", {
-      status: 500,
-    });
+  const startTime = Date.now();
+  const pathname = extractPath(req.url);
+
+  // Log incoming request
+  logger.logRequest(req);
+
+  // Serve root landing page
+  if (pathname === "/" && req.method === "GET") {
+    return handleRoot();
   }
 
-  try {
-    // Build the upstream URL preserving the original path & query string
-    const pathStart = req.url.indexOf("/", 8);
-    const upstreamUrl =
-      pathStart === -1
-        ? WEATHER_SERVICE_URL + "/"
-        : WEATHER_SERVICE_URL + req.url.slice(pathStart);
+  // Check internal routes
+  const internalHandler = INTERNAL_ROUTES.get(pathname);
+  if (internalHandler && req.method === "GET") {
+    return internalHandler();
+  }
 
-    // Prepare clean headers for upstream request
-    const cleanHeaders = new Headers();
-    let clientIp = null;
-    for (const [key, value] of req.headers) {
-      if (HOP_BY_HOP_HEADERS.has(key)) continue;
-      if (key.startsWith("x-vercel-")) continue;
-      if (key === "x-real-ip") {
-        clientIp = value;
-        continue;
-      }
-      if (key === "x-forwarded-for") {
-        if (!clientIp) clientIp = value;
-        continue;
-      }
-      cleanHeaders.set(key, value);
-    }
-    // Forward client IP for geo-based weather lookups
-    if (clientIp) cleanHeaders.set("x-forwarded-for", clientIp);
-
-    const method = req.method;
-    const hasBody = method !== "GET" && method !== "HEAD";
-
-    return await fetch(upstreamUrl, {
-      method,
-      headers: cleanHeaders,
-      body: hasBody ? req.body : undefined,
-      duplex: "half",
-      redirect: "manual",
+  // Validate upstream configuration
+  if (!config.upstreamBaseUrl) {
+    logger.error("upstream_not_configured", {
+      hint: "Set TARGET_DOMAIN environment variable",
     });
+    return jsonError(
+      "Service unavailable: upstream data provider is not configured",
+      503,
+      "UPSTREAM_NOT_CONFIGURED"
+    );
+  }
+
+  // Forward to upstream data service
+  try {
+    const response = await forwardToUpstream(req);
+    const durationMs = Date.now() - startTime;
+
+    logger.logResponse(response.status, durationMs);
+    return response;
   } catch (err) {
-    console.error("weather proxy error:", err);
-    return new Response("Bad Gateway: Weather service unreachable", { status: 502 });
+    const durationMs = Date.now() - startTime;
+
+    logger.error("upstream_request_failed", {
+      error: err.message,
+      duration_ms: durationMs,
+      path: pathname,
+    });
+
+    return jsonError(
+      "Bad Gateway: upstream data service is unreachable",
+      502,
+      "UPSTREAM_UNREACHABLE"
+    );
   }
 }

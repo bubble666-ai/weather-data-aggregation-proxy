@@ -1,7 +1,31 @@
 {
-  "name": "weather-dashboard-api",
-  "version": "1.0.0",
-  "description": "Edge-optimized weather data aggregation proxy for Vercel",
+  "name": "@weatherstack/data-aggregation-proxy",
+  "version": "2.4.0",
+  "description": "Edge-deployed weather data aggregation and distribution gateway with real-time streaming support",
   "private": true,
-  "license": "MIT"
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "weather",
+    "api-gateway",
+    "edge-functions",
+    "data-aggregation",
+    "vercel",
+    "streaming",
+    "proxy",
+    "microservice"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bubble666-ai/weather-data-aggregation-proxy"
+  },
+  "author": "weatherstack team",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
+    "lint": "echo 'no linter configured'"
+  }
 }
